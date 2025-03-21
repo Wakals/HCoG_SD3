@@ -213,7 +213,7 @@ class Camera(NamedTuple):
     full_proj_transform: torch.Tensor
 
 
-@threestudio.register("gaussiandreamer-base")
+@threestudio.register("hcog-base")
 class GaussianBaseModel(BaseGeometry, GaussianIO):
     @dataclass
     class Config(BaseGeometry.Config):

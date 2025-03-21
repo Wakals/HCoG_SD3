@@ -19,7 +19,7 @@ from lang_sam import LangSAM
 from PIL import Image
     
 
-@threestudio.register("gaussiandreamer-system")
+@threestudio.register("hcog-system")
 class GaussianSplatting(BaseLift3DSystem):
     @dataclass
     class Config(BaseLift3DSystem.Config):

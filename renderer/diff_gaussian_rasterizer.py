@@ -49,7 +49,7 @@ class Depth2Normal(torch.nn.Module):
         return normal
 
 
-@threestudio.register("gaussiandreamer-rasterizer")
+@threestudio.register("hcog-rasterizer")
 class DiffGaussian(Rasterizer, GaussianBatchRenderer):
     @dataclass
     class Config(Rasterizer.Config):

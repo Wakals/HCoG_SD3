@@ -33,7 +33,7 @@ from .gaussian_utils import *
 
 
 
-@threestudio.register("gaussiandreamer-io")
+@threestudio.register("hcog-io")
 class GaussianIO:
     def construct_list_of_attributes(self):
         l = ["x", "y", "z", "nx", "ny", "nz"]

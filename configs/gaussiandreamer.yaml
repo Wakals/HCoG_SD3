@@ -1,4 +1,4 @@
-name: "gs-sds-generation"
+name: "hcog-generation"
 tag: "${rmspace:${system.prompt_processor.prompt},_}"
 exp_root_dir: "outputs"
 seed: 0
@@ -19,9 +19,9 @@ data:
   eval_width: 1024
   eval_height: 1024
 
-system_type: "gaussiandreamer-system"
+system_type: "hcog-system"
 system:
-  geometry_type: "gaussiandreamer-base"
+  geometry_type: "hcog-base"
   geometry:
     position_lr: 0.0005
     scale_lr: 0.0005
@@ -47,7 +47,7 @@ system:
     opacity_init: 0.1
     pc_init_radius: 1.6
 
-  renderer_type: "gaussiandreamer-rasterizer"
+  renderer_type: "hcog-rasterizer"
   renderer:
     debug: false
     invert_bg_prob: 0.5
@@ -56,7 +56,7 @@ system:
   material:
     n_output_dims: 0
 
-  background_type: "gaussiandreamer-background"
+  background_type: "hcog-background"
   background:
     color_activation: sigmoid
     random_aug: true
@@ -78,7 +78,7 @@ system:
     max_step_percent: [500, 0.98, 0.50, 501]
     grad_clip: [0, 1.5, 2.0, 1000]
 
-  exporter_type: "gaussiandreamer-mesh-exporter"
+  exporter_type: "hcog-mesh-exporter"
 
   loggers:
     wandb:
