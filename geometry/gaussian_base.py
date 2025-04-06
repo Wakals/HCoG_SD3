@@ -675,7 +675,9 @@ class GaussianBaseModel(BaseGeometry, GaussianIO):
         self._opacity = optimizable_tensors["opacity"]
         
     def reset_segment_p(self):
-        self._segment_p = nn.Parameter(torch.zeros((self._segment_p.shape[0], 2), dtype=torch.float, device="cuda") * 0.5).requires_grad_(True)
+        segment_p_new = torch.zeros((self._segment_p.shape[0], 2), dtype=torch.float, device="cuda").to(self._segment_p.device)
+        optimizable_tensors = self.replace_tensor_to_optimizer(segment_p_new, "segment_p")
+        self._segment_p = optimizable_tensors["segment_p"]
 
     def to(self, device="cpu"):
         self._xyz = self._xyz.to(device)

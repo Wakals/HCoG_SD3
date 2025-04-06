@@ -24,18 +24,14 @@ class GaussianSplatting(BaseLift3DSystem):
     @dataclass
     class Config(BaseLift3DSystem.Config):
         visualize_samples: bool = False
-        switch_step: int = 300
-        switch_step_2: int = 500
+        
         segment_threshold: float = 0.95
-        switch_step_3: int = 900
-        switch_step_4: int = 1200
-        switch_step_5: int = 1400
         
         init_steps: int = 300
-        expand_steps: int = 1200
+        expand_steps: int = 900
         final_optim_steps: int = 1200
         
-        seg_steps: int = 200
+        seg_steps: int = 100
         optim_steps: int = 400
         
 
@@ -57,6 +53,9 @@ class GaussianSplatting(BaseLift3DSystem):
         self.order_idx = 0
         self.seg_num = 0
         
+        self.stage_num = 0
+        self.cur_step = 0
+        
         self.init_steps = self.cfg.init_steps
         self.expand_steps = self.cfg.expand_steps
         self.final_optim_steps = self.cfg.final_optim_steps
@@ -64,23 +63,9 @@ class GaussianSplatting(BaseLift3DSystem):
         self.seg_steps = self.cfg.seg_steps
         self.optim_steps = self.cfg.optim_steps
         
-        self.final_flag = False
-        self.is_seg = False
-        self.is_optim = False
-        self.is_expand = False
-        
-        self.switch_step = self.cfg.switch_step
-        self.switch_step_2 = self.cfg.switch_step_2
         self.segment_threshold = self.cfg.segment_threshold
-        self.switch_step_3 = self.cfg.switch_step_3
-        self.switch_step_4 = self.cfg.switch_step_4
-        self.switch_step_5 = self.cfg.switch_step_5
 
         self.guidance = threestudio.find(self.cfg.guidance_type)(self.cfg.guidance)
-        # self.prompt_processor = threestudio.find(self.cfg.prompt_processor_type)(
-        #     self.cfg.prompt_processor
-        # )
-        # self.prompt_utils = self.prompt_processor()
         
         new_cfg = self.cfg.prompt_processor
         new_cfg.prompt = self.text_prompts[0]
@@ -111,40 +96,25 @@ class GaussianSplatting(BaseLift3DSystem):
     def on_fit_start(self) -> None:
         super().on_fit_start()
         
-    def training_step_new(self, batch, batch_idx):
-        # TODO
-        if self.global_step == self.init_steps + self.layer * self.expand_steps + self.seg_num * (self.seg_steps + self.optim_steps):
-            
-            while True:
-                if self.order_idx >= len(self.stratification_order):
-                    self.final_flag = True
-                    break
-                cur_order = self.stratification_order[self.order_idx]
-                if cur_order == "EXTEND":
-                    self.layer += 1
-                    self.order_idx += 1
-                    break
-                out = self(batch)
-                image = out["comp_rgb"].detach().cpu().clone()
-                image = image
-                img = (image[0] * 255).clamp(0, 255).byte()
-                np_image = img.numpy()
-                image_pil = Image.fromarray(np_image)
-                check_pth = f'./check_attribute.png'
-                image_pil.save(check_pth)
-                attr, part = cur_order.split(" ")[0], cur_order.split(" ")[-1]
-                res = ImageEvaluate(attr, part, check_pth)
-                if res[0] == "Y" or res[0] == "y":
-                    self.order_idx += 1
-                else:
-                    self.training_step_sam(batch, batch_idx, cur_order)
-                    self.order_idx += 1
-
     def training_step(self, batch, batch_idx):
-        if self.global_step < self.switch_step:
+        # stage 0: original training
+        # stage 1: sam segmentation
+        # stage 2: part optimization
+        # stage 3: extend
+        # stage 4: segment for Label Elimination
+        # stage 5: Label Elimination
+        # stage 6: final optimization
+        if self.stage_num == 0:
+            self.cur_step += 1
+            if self.cur_step == self.init_steps:
+                self.cur_step = 0
+                self.stage_num = 1
             return self.training_step_original(batch, batch_idx)
-        elif self.global_step < self.switch_step_2:
-            if self.global_step == self.switch_step:
+        
+        if self.stage_num == 1:
+            if self.cur_step == 0:
+                self.geometry.reset_segment_p()
+                
                 out = self(batch)
                 image = out["comp_rgb"].detach().cpu().clone()
                 image = image
@@ -156,25 +126,62 @@ class GaussianSplatting(BaseLift3DSystem):
                 if not os.path.exists('./check'):
                     os.makedirs('./check')
                 image_pil.save(check_pth)
+                cur_order = self.stratification_order[self.order_idx]
                 while True:
+                    if self.order_idx >= len(self.stratification_order):
+                        self.cur_step = 0
+                        self.stage_num = 6
+                        return self.training_step(batch, batch_idx)
                     cur_order = self.stratification_order[self.order_idx]
                     if cur_order == "EXTEND":
-                        self.switch_step_2 = self.switch_step
-                        self.switch_step_3 = self.switch_step
+                        self.cur_step = 0
+                        self.stage_num = 3
                         self.order_idx += 1
                         self.layer += 1
                         return self.training_step(batch, batch_idx)
-                    attr = cur_order.split(" ")[0]
-                    part = cur_order.split(" ")[-1]
+                    for instance in self.instances:
+                        attribute = self.instances[instance]
+                        if instance in cur_order.split(" "):
+                            attr = attribute
+                            part = instance
+                            break
                     print(f"the attr is {attr}, the part is {part}")
                     res = ImageEvaluate(attr, part, check_pth)
                     if res[0] == "y" or res[0] == "Y":
                         self.order_idx += 1
                     else:
                         break
-            return self.training_step_sam(batch, batch_idx, cur_order)
-        elif self.global_step < self.switch_step_3:
-            if self.global_step == self.switch_step_2:
+                
+                # select every gaussian kernels
+                self.geometry.selected_gaussians = torch.ones(self.geometry._xyz.shape[0], dtype=torch.bool)
+                self.geometry.selected_gaussians = self.geometry.selected_gaussians.to(self.geometry._xyz.device)
+                def hook_fn(grad):
+                    mask_shape = [grad.shape[0]] + [1] * (grad.dim() - 1)
+                    mask = self.geometry.selected_gaussians.to(grad.dtype).view(mask_shape)  
+                    return grad * mask
+                self.geometry._xyz.register_hook(hook_fn)
+                self.geometry._features_dc.register_hook(hook_fn)
+                self.geometry._features_rest.register_hook(hook_fn)
+                self.geometry._scaling.register_hook(hook_fn)
+                self.geometry._rotation.register_hook(hook_fn)
+                self.geometry._opacity.register_hook(hook_fn)
+                self.geometry._segment_p.register_hook(hook_fn)
+                
+            self.cur_step += 1
+            cur_order = self.stratification_order[self.order_idx]
+            for instance in self.instances:
+                attribute = self.instances[instance]
+                if instance in cur_order.split(" "):
+                    attr = attribute
+                    part = instance
+                    break
+            if self.cur_step == self.seg_steps:
+                self.cur_step = 0
+                self.stage_num = 2
+            return self.training_step_sam(batch, batch_idx, part)
+        
+        if self.stage_num == 2:
+            if self.cur_step == 0:
                 self.geometry.selected_gaussians = (self.geometry.get_segment_p > self.segment_threshold).to(torch.bool)
                 self.geometry.selected_gaussians = self.geometry.selected_gaussians[:, 0]
                 
@@ -191,26 +198,33 @@ class GaussianSplatting(BaseLift3DSystem):
                 self.geometry._opacity.register_hook(hook_fn)
                 self.geometry._segment_p.register_hook(hook_fn)
                 
-                # self.geometry.prune_points(~self.geometry.selected_gaussians)
-                
-                # self.geometry.cfg.position_lr = 0.0
-                # self.geometry.cfg.opacity_lr = 0.0
-                # self.geometry.cfg.scaling_lr = 0.0
-                # self.geometry.cfg.rotation_lr = 0.0
-                # self.geometry.cfg.feature_lr = 0.1
-                # self.geometry.cfg.segment_feature_lr = 0.0
-                # self.geometry.cfg.normal_lr = 0.0
-                
                 new_cfg = self.cfg.prompt_processor
                 new_cfg.prompt = self.stratification_order[self.order_idx]
                 self.prompt_processor = threestudio.find(self.cfg.prompt_processor_type)(new_cfg)
                 self.prompt_utils = self.prompt_processor()
                 
+            self.cur_step += 1
+            if self.cur_step == self.optim_steps:
+                self.order_idx += 1
+                if self.order_idx >= len(self.stratification_order):
+                    self.cur_step = 0
+                    self.stage_num = 6
+                    return self.training_step(batch, batch_idx)
+                cur_order = self.stratification_order[self.order_idx]
+                if cur_order == "EXTEND":
+                    self.order_idx += 1
+                    self.layer += 1
+                    self.cur_step = 0
+                    self.stage_num = 3
+                    return self.training_step(batch, batch_idx)
+                self.cur_step = 0
+                self.stage_num = 1
             return self.training_step_sam_2(batch, batch_idx)
-            
-        elif self.global_step < self.switch_step_4:
-            if self.global_step == self.switch_step_3:
+        
+        if self.stage_num == 3:
+            if self.cur_step == 0:
                 init_num_points = self.geometry._xyz.shape[0]
+                # print(f'init_num_points: {init_num_points}')
                 self.geometry.densify_double()
                 self.geometry.selected_gaussians = torch.cat([torch.zeros(init_num_points, dtype=torch.bool), torch.ones(self.geometry._xyz.shape[0] - init_num_points, dtype=torch.bool)])
                 self.geometry.selected_gaussians = self.geometry.selected_gaussians.to(self.geometry._xyz.device)
@@ -233,31 +247,76 @@ class GaussianSplatting(BaseLift3DSystem):
                 self.prompt_processor = threestudio.find(self.cfg.prompt_processor_type)(new_cfg)
                 self.prompt_utils = self.prompt_processor()
                 
-            return self.training_step_sam_2(batch, batch_idx)
+            self.cur_step += 1
+            if self.cur_step == self.expand_steps:
+                self.cur_step = 0
+                self.stage_num = 4
+            return self.training_step_original(batch, batch_idx)
         
-        elif self.global_step < self.switch_step_5:
-            cur_order = self.stratification_order[self.order_idx]
+        if self.stage_num == 4:
+            if self.cur_step == 0:
+                self.geometry.reset_segment_p()
+            self.cur_step += 1
+            cur_order_idx = self.order_idx
+            orders = []
+            while cur_order_idx < len(self.stratification_order) and self.stratification_order[cur_order_idx] != "EXTEND":
+                for instance in self.instances:
+                    attribute = self.instances[instance]
+                    if instance in self.stratification_order[cur_order_idx].split(" "):
+                        attr = attribute
+                        part = instance
+                        break
+                orders.append(part)
+                cur_order_idx += 1
+            # random choose one order
+            assert len(orders) > 0
+            cur_order = orders[np.random.randint(0, len(orders))]
+            if self.cur_step == self.seg_steps:
+                self.cur_step = 0
+                self.stage_num = 5
             return self.training_step_sam(batch, batch_idx, cur_order)
-        else:
-            if self.global_step == self.switch_step_5:
-                origin_labels = ~self.geometry.selected_gaussians
-                seg_labels = (self.geometry.get_segment_p > self.segment_threshold).to(torch.bool)[:, 0]
-                # align origin_labels and seg_labels
-                dif_len = seg_labels.shape[0] - origin_labels.shape[0]
-                if dif_len > 0:
-                    origin_labels = torch.cat([origin_labels, torch.zeros(dif_len, dtype=torch.bool, device=origin_labels.device)])
-                elif dif_len < 0:
-                    seg_labels = torch.cat([seg_labels, torch.zeros(-dif_len, dtype=torch.bool, device=seg_labels.device)])
-                labels = origin_labels | seg_labels
-                print(f'the num of selected gaussians in the last stage is {labels.sum()}')
-                self.geometry.prune_points(~labels)
-                
+        
+        if self.stage_num == 5:
+            origin_labels = ~self.geometry.selected_gaussians
+            seg_labels = (self.geometry.get_segment_p > self.segment_threshold).to(torch.bool)[:, 0]
+            # align origin_labels and seg_labels
+            dif_len = seg_labels.shape[0] - origin_labels.shape[0]
+            if dif_len > 0:
+                origin_labels = torch.cat([origin_labels, torch.zeros(dif_len, dtype=torch.bool, device=origin_labels.device)])
+            elif dif_len < 0:
+                seg_labels = torch.cat([seg_labels, torch.zeros(-dif_len, dtype=torch.bool, device=seg_labels.device)])
+            labels = origin_labels | seg_labels
+            self.geometry.prune_points(~labels)
+            
+            self.cur_step = 0
+            self.stage_num = 1
+            return self.training_step(batch, batch_idx)
+        
+        if self.stage_num == 6:
+            if self.cur_step == 0:
                 new_cfg = self.cfg.prompt_processor
                 new_cfg.prompt = self.original_prompt
                 self.prompt_processor = threestudio.find(self.cfg.prompt_processor_type)(new_cfg)
                 self.prompt_utils = self.prompt_processor()
                 
-            return self.training_step_sam_2(batch, batch_idx)
+                # select every gaussian kernels
+                self.geometry.selected_gaussians = torch.ones(self.geometry._xyz.shape[0], dtype=torch.bool)
+                self.geometry.selected_gaussians = self.geometry.selected_gaussians.to(self.geometry._xyz.device)
+                def hook_fn(grad):
+                    mask_shape = [grad.shape[0]] + [1] * (grad.dim() - 1)
+                    mask = self.geometry.selected_gaussians.to(grad.dtype).view(mask_shape)  
+                    return grad * mask
+                self.geometry._xyz.register_hook(hook_fn)
+                self.geometry._features_dc.register_hook(hook_fn)
+                self.geometry._features_rest.register_hook(hook_fn)
+                self.geometry._scaling.register_hook(hook_fn)
+                self.geometry._rotation.register_hook(hook_fn)
+                self.geometry._opacity.register_hook(hook_fn)
+                self.geometry._segment_p.register_hook(hook_fn)
+                
+            self.cur_step += 1
+                
+            return self.training_step_original(batch, batch_idx)
             
 
     def training_step_original(self, batch, batch_idx):
@@ -366,15 +425,36 @@ class GaussianSplatting(BaseLift3DSystem):
         if len(masks.shape) > 1:
             mask = masks[0].float().to("cuda") 
             mask = mask.clamp(0, 1)
+            
+            # save mask as grey png image
+            if self.global_step % 50 == 0:
+                mask_img = (mask * 255).clamp(0, 255).byte()
+                np_mask = mask_img.cpu().numpy()
+                mask_pil = Image.fromarray(np_mask)
+                check_pth = f'./check/check_mask_{self.global_step}.png'
+                mask_pil.save(check_pth)
 
             segment_img = rendered_segment[0][:, :, 0]
+            
+            # save segment_img as grey png image
+            if self.global_step % 50 == 0:
+                segment_img_ = (segment_img * 255).clamp(0, 255).byte()
+                np_segment = segment_img_.cpu().numpy()
+                segment_pil = Image.fromarray(np_segment)
+                check_pth = f'./check/check_segment_{self.global_step}.png'
+                segment_pil.save(check_pth)
+            
             segment_loss = F.binary_cross_entropy_with_logits(segment_img, mask)
 
             self.log("train/segment_loss", segment_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
             
-            opt.zero_grad()
-            self.manual_backward(segment_loss)
+            # self.manual_backward(segment_loss)
+            segment_loss.backward(retain_graph=True)
             opt.step()
+            opt.zero_grad(set_to_none=True)
+            # print the lr of the optimizer
+            # for param_group in opt.param_groups:
+            #     print(f"the lr is {param_group['lr']}")
             
             
     def training_step_sam_2(self, batch, batch_idx):
@@ -453,12 +533,6 @@ class GaussianSplatting(BaseLift3DSystem):
 
         loss_sds.backward(retain_graph=True)
         iteration = self.global_step
-        self.geometry.update_states(
-            iteration,
-            visibility_filter,
-            radii,
-            viewspace_point_tensor,
-        )
         if loss > 0:
             loss.backward()
         opt.step()
